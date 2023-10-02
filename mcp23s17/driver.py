@@ -1,8 +1,8 @@
-from abc import ABC
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import auto, Enum, IntEnum
-from typing import ClassVar
+from typing import cast, ClassVar
 from warnings import warn
 
 from periphery import GPIO, SPI
@@ -192,11 +192,60 @@ class MCP23S17:
 
         @property
         def bits(self) -> type[IntEnum]:
-            return self.value.BITS
+            return cast(type[IntEnum], self.value.BITS)
 
         @property
         def address(self) -> int:
-            return self.value.ADDRESS
+            return cast(int, self.value.ADDRESS)
+
+    @dataclass
+    class Operation(ABC):
+        READ_OR_WRITE_BIT: ClassVar[int]
+        hardware_address: int
+        register_address: int
+
+        @property
+        def control_byte(self) -> int:
+            return (
+                (MCP23S17.FIXED_BITS << MCP23S17.FIXED_BITS_OFFSET)
+                | (self.hardware_address << MCP23S17.CLIENT_ADDRESS_OFFSET)
+                | (self.READ_OR_WRITE_BIT << MCP23S17.READ_OR_WRITE_BIT_OFFSET)
+            )
+
+        @property
+        @abstractmethod
+        def data_bytes(self) -> list[int]:
+            pass
+
+        @property
+        def transmitted_data(self) -> list[int]:
+            return [self.control_byte, self.register_address, *self.data_bytes]
+
+        @abstractmethod
+        def parse(self, received_data: list[int]) -> list[int] | None:
+            pass
+
+    @dataclass
+    class Read(Operation):
+        READ_OR_WRITE_BIT: ClassVar[int] = 1
+        data_byte_count: int
+
+        @property
+        def data_bytes(self) -> list[int]:
+            return (
+                [(1 << MCP23S17.SPI_WORD_BIT_COUNT) - 1] * self.data_byte_count
+            )
+
+        def parse(self, received_data: list[int]) -> list[int]:
+            return received_data[-self.data_byte_count:]
+
+    @dataclass
+    class Write(Operation):
+        READ_OR_WRITE_BIT: ClassVar[int] = 0
+        data_bytes: list[int]
+
+        def parse(self, received_data: list[int]) -> None:
+            return None
 
     SPI_MODES: ClassVar[tuple[int, int]] = 0b00, 0b11
     """The supported spi modes."""
@@ -206,16 +255,14 @@ class MCP23S17:
     """The supported spi bit order."""
     SPI_WORD_BIT_COUNT: ClassVar[int] = 8
     """The supported spi number of bits per word."""
-    READ_WRITE_BIT_OFFSET: ClassVar[int] = 0
-    """The R/W bit offset."""
     FIXED_BITS: ClassVar[int] = 0b0100
     """The four fixed bits."""
     FIXED_BITS_OFFSET: ClassVar[int] = 4
     """The fixed-bits offset."""
-    READ_BIT: ClassVar[int] = 1
-    """The read bit."""
-    WRITE_BIT: ClassVar[int] = 0
-    """The write bit."""
+    CLIENT_ADDRESS_OFFSET: ClassVar[int] = 1
+    """The client address offset."""
+    READ_OR_WRITE_BIT_OFFSET: ClassVar[int] = 0
+    """The R/W bit offset."""
     hardware_reset_gpio: GPIO
     """The hardware reset GPIO."""
     interrupt_output_a_gpio: GPIO
@@ -239,3 +286,25 @@ class MCP23S17:
 
         if self.spi.extra_flags:
             warn(f'unknown spi extra flags {self.spi.extra_flags}')
+
+    def operate(self, *operations: Operation) -> list[list[int] | None]:
+        transmitted_data = []
+
+        for operation in operations:
+            transmitted_data.extend(operation.transmitted_data)
+
+        received_data = self.spi.transfer(transmitted_data)
+
+        assert isinstance(received_data, list)
+
+        parsed_data = []
+        begin = 0
+
+        for operation in operations:
+            end = begin + len(operation.transmitted_data)
+
+            parsed_data.append(operation.parse(received_data[begin:end]))
+
+            begin = end
+
+        return parsed_data
