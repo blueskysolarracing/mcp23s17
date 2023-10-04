@@ -270,7 +270,7 @@ class MCP23S17:
     interrupt_output_b_gpio: GPIO
     """The interrupt output for PORTB GPIO."""
     spi: SPI
-    """The SPI for the ADC device."""
+    """The SPI."""
     callback: Callable[[Port], None]
     """The callback function."""
 
